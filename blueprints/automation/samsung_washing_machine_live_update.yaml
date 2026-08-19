@@ -22,7 +22,10 @@ blueprint:
           domain: [sensor, binary_sensor, switch]
     completion_time_entity:
       name: Completion time entity
-      description: Timestamp sensor holding the end of the cycle.
+      description: >-
+        Timestamp sensor holding the end of the cycle. In some locales this is
+        the entity named after the remaining time — what matters is that it
+        holds a date, not a number.
       selector:
         entity:
           domain: [sensor, input_datetime]
@@ -98,6 +101,14 @@ blueprint:
       default: ""
       selector:
         text:
+    show_job_state:
+      name: Show the current phase
+      description: >-
+        Put the phase from the job state entity in front of the countdown —
+        "Rinsing · 22 min remaining · ends at 20:33".
+      default: true
+      selector:
+        boolean:
     notify_when_finished:
       name: Notify when the cycle is over
       description: Replaces the Live Update with a normal notification once the machine stops.
@@ -124,6 +135,7 @@ variables:
   running: !input running_state
   lang: !input language
   notify_finished: !input notify_when_finished
+  show_phase: !input show_job_state
   service_override: !input notify_service_override
   # mobile_app names its notify service after the device it registered. A
   # notify group counts as one service and fans out on its own, so the override
@@ -140,6 +152,39 @@ variables:
       {% endfor %}
     {% endif %}
     {{ ns.items }}
+  # SmartThings job states, named per language. Anything missing falls back to
+  # the raw value with its underscores removed.
+  job_names: >-
+    {% set names = {
+      'en': {'air_wash': 'Air wash', 'ai_rinse': 'AI rinse', 'ai_spin': 'AI spin',
+             'ai_wash': 'AI wash', 'cooling': 'Cooling', 'delay_wash': 'Delayed start',
+             'drying': 'Drying', 'freeze_protection': 'Freeze protection',
+             'pre_wash': 'Pre-wash', 'rinse': 'Rinsing', 'spin': 'Spinning',
+             'wash': 'Washing', 'weight_sensing': 'Weighing',
+             'wrinkle_prevent': 'Wrinkle prevent'},
+      'fr': {'air_wash': "Lavage à l'air", 'ai_rinse': 'Rinçage AI', 'ai_spin': 'Essorage AI',
+             'ai_wash': 'Lavage AI', 'cooling': 'Refroidissement', 'delay_wash': 'Départ différé',
+             'drying': 'Séchage', 'freeze_protection': 'Protection antigel',
+             'pre_wash': 'Prélavage', 'rinse': 'Rinçage', 'spin': 'Essorage',
+             'wash': 'Lavage', 'weight_sensing': 'Pesée',
+             'wrinkle_prevent': 'Anti-froissage'},
+      'nl': {'air_wash': 'Luchtwas', 'ai_rinse': 'AI-spoelen', 'ai_spin': 'AI-centrifugeren',
+             'ai_wash': 'AI-wassen', 'cooling': 'Koelen', 'delay_wash': 'Uitgestelde start',
+             'drying': 'Drogen', 'freeze_protection': 'Vorstbeveiliging',
+             'pre_wash': 'Voorwas', 'rinse': 'Spoelen', 'spin': 'Centrifugeren',
+             'wash': 'Wassen', 'weight_sensing': 'Wegen',
+             'wrinkle_prevent': 'Kreukbeveiliging'} } %}
+    {{ names.get(lang, names['en']) }}
+  # The phase shown in front of the countdown. Empty when there is no job state
+  # entity, when it is idle, or when it says the load is over — "finished" next
+  # to a running countdown would contradict itself.
+  phase: >-
+    {% if show_phase and job_entity != '' %}
+      {% set raw = states(job_entity) | lower %}
+      {% if raw not in finished_jobs and raw not in ['none', 'unknown', 'unavailable'] %}
+        {{ job_names.get(raw, raw | replace('_', ' ') | capitalize) }}
+      {% endif %}
+    {% endif %}
   finished_jobs: >-
     {{ finished_jobs_raw.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
   job_finished: >-
@@ -147,7 +192,12 @@ variables:
   # A washer that keeps tumbling after the programme — wrinkle care, an extra
   # spin, or simply a machine left on "run" while idle — reports a state that
   # says nothing about the load, so the job state has the last word.
-  is_running: "{{ states(state_entity) == running and not job_finished }}"
+  # Some locales publish the end of the cycle under a "remaining time" name and
+  # park it on "stop" when nothing is running. That is the integration saying
+  # there is no cycle, and it outranks a machine state left on "run".
+  time_halted: "{{ (states(end_entity) | lower) in ['stop', 'stopped', 'none'] }}"
+  is_running: >-
+    {{ states(state_entity) == running and not job_finished and not time_halted }}
   # The state entity has held "run" since the cycle started, so its
   # last_changed is the start of the cycle — no helper entity needed.
   # Epoch seconds all the way down: a datetime in a variable is rendered back
@@ -193,9 +243,13 @@ conditions:
   - condition: template
     value_template: "{{ states(state_entity) not in ['unavailable', 'unknown'] }}"
   # Once everything is idle there is nothing to refresh and nothing to clear.
+  # Every signal that can mean "the cycle is over" has to get through, though —
+  # including the time entity dropping to "stop", which on some washers is the
+  # only sign the load has finished.
   - condition: template
     value_template: >-
-      {{ is_running or stale_end or trigger.id in ['state_changed', 'job_done'] }}
+      {{ is_running or stale_end
+         or trigger.id in ['state_changed', 'job_done', 'end_moved'] }}
 
 actions:
   - choose:
@@ -219,9 +273,10 @@ actions:
                       {% set h = left // 3600 %}
                       {% set m = (left % 3600) // 60 %}
                       {% set rem = (h ~ 'h' ~ '%02d' % m) if h > 0 else (m ~ ' min') %}
-                      {% if lang == 'fr' %}{{ rem }} restant · fin à {{ at }}
-                      {% elif lang == 'nl' %}nog {{ rem }} · klaar om {{ at }}
-                      {% else %}{{ rem }} remaining · ends at {{ at }}{% endif %}
+                      {% set head = (phase | trim ~ ' · ') if phase | trim else '' %}
+                      {% if lang == 'fr' %}{{ head }}{{ rem }} restant · fin à {{ at }}
+                      {% elif lang == 'nl' %}{{ head }}nog {{ rem }} · klaar om {{ at }}
+                      {% else %}{{ head }}{{ rem }} remaining · ends at {{ at }}{% endif %}
                     data:
                       tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
                       live_update: true

@@ -6,15 +6,17 @@
  * Designed for the SmartThings integration.
  */
 
-const CARD_VERSION = "1.2.0";
+const CARD_VERSION = "1.3.0";
 
 const DEFAULTS = {
   icon: "mdi:washing-machine",
   running_states: ["run", "running", "on", "wash", "washing"],
   paused_states: ["pause", "paused"],
   finished_states: ["finish", "finished", "complete", "completed"],
+  stopped_time_values: ["stop", "stopped", "none"],
   show_start_button: true,
   show_progress_bar: true,
+  show_job_state: true,
   animate_progress: true,
   tap_action: { action: "more-info" },
 };
@@ -22,9 +24,9 @@ const DEFAULTS = {
 // Entities the card looks for on its own, in order, when the matching option
 // is not set. Matched against the entity_id, then the friendly name.
 const AUTO_SUFFIXES = {
-  completion_time_entity: ["completion_time", "finish_time", "end_time"],
-  remaining_time_entity: ["remaining_time", "time_remaining"],
-  job_state_entity: ["job_state"],
+  completion_time_entity: ["completion_time", "finish_time", "end_time", "heure_de_fin"],
+  remaining_time_entity: ["remaining_time", "time_remaining", "temps_restant"],
+  job_state_entity: ["job_state", "etat_du_cycle", "cycle_state", "job_status"],
 };
 
 const TRANSLATIONS = {
@@ -60,6 +62,62 @@ const TRANSLATIONS = {
     ends_at: "klaar om {time}",
     start: "Starten",
     separator: " · ",
+  },
+};
+
+// SmartThings job states. "none" is deliberately absent: an idle job state is
+// not a phase to display.
+const JOB_STATES = {
+  en: {
+    air_wash: "Air wash",
+    ai_rinse: "AI rinse",
+    ai_spin: "AI spin",
+    ai_wash: "AI wash",
+    cooling: "Cooling",
+    delay_wash: "Delayed start",
+    drying: "Drying",
+    finish: "Finished",
+    freeze_protection: "Freeze protection",
+    pre_wash: "Pre-wash",
+    rinse: "Rinsing",
+    spin: "Spinning",
+    wash: "Washing",
+    weight_sensing: "Weighing",
+    wrinkle_prevent: "Wrinkle prevent",
+  },
+  fr: {
+    air_wash: "Lavage à l'air",
+    ai_rinse: "Rinçage AI",
+    ai_spin: "Essorage AI",
+    ai_wash: "Lavage AI",
+    cooling: "Refroidissement",
+    delay_wash: "Départ différé",
+    drying: "Séchage",
+    finish: "Terminé",
+    freeze_protection: "Protection antigel",
+    pre_wash: "Prélavage",
+    rinse: "Rinçage",
+    spin: "Essorage",
+    wash: "Lavage",
+    weight_sensing: "Pesée",
+    wrinkle_prevent: "Anti-froissage",
+  },
+  nl: {
+    air_wash: "Luchtwas",
+    ai_rinse: "AI-spoelen",
+    ai_spin: "AI-centrifugeren",
+    ai_wash: "AI-wassen",
+    cooling: "Koelen",
+    delay_wash: "Uitgestelde start",
+    drying: "Drogen",
+    finish: "Klaar",
+    freeze_protection: "Vorstbeveiliging",
+    pre_wash: "Voorwas",
+    rinse: "Spoelen",
+    spin: "Centrifugeren",
+    wash: "Wassen",
+    weight_sensing: "Wegen",
+    wrinkle_prevent: "Kreukbeveiliging",
   },
 };
 
@@ -103,10 +161,16 @@ const parseDuration = (stateObj) => {
   return value * 60;
 };
 
+// A date has to look like one before it is parsed: Date.parse("90") happily
+// answers 1990, which would turn a 90 minute countdown into a date.
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+
 /** Epoch ms held by a timestamp state, or null when it cannot be read. */
 const parseTimestamp = (stateObj) => {
-  if (!stateObj || UNKNOWN_STATES.includes(String(stateObj.state).toLowerCase())) return null;
-  const ms = Date.parse(stateObj.state);
+  if (!stateObj) return null;
+  const raw = String(stateObj.state).trim();
+  if (UNKNOWN_STATES.includes(raw.toLowerCase()) || !ISO_DATE.test(raw)) return null;
+  const ms = Date.parse(raw);
   return Number.isNaN(ms) ? null : ms;
 };
 
@@ -170,9 +234,36 @@ class SamsungWashingMachineCard extends HTMLElement {
 
   /* ---------- config helpers ---------- */
 
+  get _lang() {
+    return (this._config.language || (this._hass && this._hass.language) || "en").slice(0, 2);
+  }
+
+  /**
+   * Human name of the phase the machine is in, or null when there is nothing
+   * worth showing. Falls back to the entity's own translated state, so a value
+   * this card does not know about still reads better than a raw enum key.
+   */
+  _jobPhase() {
+    if (this._config.show_job_state === false) return null;
+    const stateObj = this._state(this._entityFor("job_state_entity"));
+    if (!stateObj) return null;
+
+    const raw = String(stateObj.state).toLowerCase();
+    if (UNKNOWN_STATES.includes(raw)) return null;
+    // "Finished" is already the subtitle of a stopped machine; repeating it
+    // next to a countdown would be contradictory.
+    if (toList(this._config.finished_states).includes(raw)) return null;
+
+    const names = { ...JOB_STATES.en, ...(JOB_STATES[this._lang] || {}), ...(this._config.job_state_labels || {}) };
+    if (names[raw]) return names[raw];
+
+    const translated = this._hass.formatEntityState ? this._hass.formatEntityState(stateObj) : null;
+    if (translated && translated.toLowerCase() !== raw) return translated;
+    return raw.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+  }
+
   get _t() {
-    const lang = (this._config.language || (this._hass && this._hass.language) || "en").slice(0, 2);
-    return { ...TRANSLATIONS.en, ...(TRANSLATIONS[lang] || {}), ...(this._config.labels || {}) };
+    return { ...TRANSLATIONS.en, ...(TRANSLATIONS[this._lang] || {}), ...(this._config.labels || {}) };
   }
 
   /** Resolve an option to an entity id, guessing from the main entity's name. */
@@ -212,6 +303,15 @@ class SamsungWashingMachineCard extends HTMLElement {
     const state = String(stateObj.state).toLowerCase();
     if (["unavailable", "unknown"].includes(state)) return "unavailable";
 
+    // A time entity that reads "stop" rather than a value is the integration
+    // saying there is no cycle — trust it over a machine state left on "run".
+    const timeEntities = ["completion_time_entity", "remaining_time_entity"];
+    const halted = timeEntities.some((key) => {
+      const obj = this._state(this._entityFor(key));
+      return obj && toList(this._config.stopped_time_values).includes(String(obj.state).toLowerCase());
+    });
+    if (halted) return "stopped";
+
     if (toList(this._config.running_states).includes(state)) return "running";
     if (toList(this._config.paused_states).includes(state)) return "paused";
 
@@ -221,6 +321,18 @@ class SamsungWashingMachineCard extends HTMLElement {
     if (job && toList(this._config.finished_states).includes(String(job.state).toLowerCase())) return "finished";
     if (toList(this._config.finished_states).includes(state)) return "finished";
     return "stopped";
+  }
+
+  /**
+   * End of the cycle, epoch ms, or null. Integrations disagree on which entity
+   * carries it: a "remaining time" sensor holding a timestamp — SmartThings in
+   * some locales — is an end time under a misleading name, so both entities are
+   * tried before giving up.
+   */
+  _endTimestamp() {
+    const completion = parseTimestamp(this._state(this._entityFor("completion_time_entity")));
+    if (completion !== null) return completion;
+    return parseTimestamp(this._state(this._entityFor("remaining_time_entity")));
   }
 
   /** Seconds left in the running cycle, or null when unknown. */
@@ -541,7 +653,7 @@ class SamsungWashingMachineCard extends HTMLElement {
     const machineState = this._machineState();
     const running = machineState === "running" || machineState === "paused";
 
-    const endTs = parseTimestamp(this._state(this._entityFor("completion_time_entity")));
+    const endTs = this._endTimestamp();
     const remaining = running ? this._remainingSeconds(endTs) : null;
     const progress = this._progress(running, endTs);
 
@@ -557,11 +669,14 @@ class SamsungWashingMachineCard extends HTMLElement {
       text = t.unavailable;
     } else if (running) {
       const parts = [];
+      const phase = this._jobPhase();
       const left = this._formatDuration(remaining);
       const end = this._formatTime(endTs);
+      if (phase) parts.push(phase);
       if (left) parts.push(t.remaining.replace("{time}", left));
       if (end && cfg.show_end_time !== false) parts.push(t.ends_at.replace("{time}", end));
       text = parts.length ? parts.join(t.separator) : machineState === "paused" ? t.paused : t.running;
+      // Paused already prefixes the line, so a phase there would read twice.
       if (machineState === "paused" && parts.length) text = `${t.paused}${t.separator}${text}`;
     } else if (machineState === "finished") {
       text = t.finished;
@@ -605,6 +720,7 @@ const LABELS = {
   start_time_entity: "Cycle start time entity",
   job_state_entity: "Job state entity",
   show_progress_bar: "Show the progress bar",
+  show_job_state: "Show the current phase",
   animate_progress: "Animate the progress bar",
   show_end_time: "Show the end time",
   show_start_button: "Show the start button",
@@ -620,7 +736,7 @@ const HELPERS = {
   remaining_time_entity: "Optional; otherwise the remaining time is the completion time minus now",
   progress_entity: "Optional 0-100 sensor; otherwise progress is measured from the start of the cycle",
   start_time_entity: "Optional; otherwise the card remembers when the cycle started",
-  job_state_entity: "Used to tell a finished load from a stopped machine",
+  job_state_entity: "Shows the current phase, and tells a finished load from a stopped machine",
   start_entity: "Defaults to the washer's switch entity",
   language: "Defaults to the Home Assistant language",
 };
@@ -637,12 +753,14 @@ const SCHEMA = [
   },
   { name: "completion_time_entity", selector: { entity: { domain: "sensor" } } },
   { name: "remaining_time_entity", selector: { entity: { domain: "sensor" } } },
+  { name: "job_state_entity", selector: { entity: { domain: "sensor" } } },
   {
     type: "grid",
     name: "",
     schema: [
       { name: "show_progress_bar", selector: { boolean: {} } },
       { name: "animate_progress", selector: { boolean: {} } },
+      { name: "show_job_state", selector: { boolean: {} } },
       { name: "show_end_time", selector: { boolean: {} } },
       { name: "show_start_button", selector: { boolean: {} } },
     ],
@@ -655,7 +773,6 @@ const SCHEMA = [
     schema: [
       { name: "progress_entity", selector: { entity: { domain: "sensor" } } },
       { name: "start_time_entity", selector: { entity: { domain: "sensor" } } },
-      { name: "job_state_entity", selector: { entity: { domain: "sensor" } } },
       { name: "start_icon", selector: { icon: {} } },
       {
         name: "language",
@@ -674,12 +791,13 @@ const SCHEMA = [
   },
 ];
 
-const BOOLEAN_KEYS = ["show_progress_bar", "animate_progress", "show_end_time", "show_start_button"];
+const BOOLEAN_KEYS = ["show_progress_bar", "animate_progress", "show_end_time", "show_start_button", "show_job_state"];
 const BOOLEAN_DEFAULTS = {
   show_progress_bar: true,
   animate_progress: true,
   show_end_time: true,
   show_start_button: true,
+  show_job_state: true,
 };
 
 class SamsungWashingMachineCardEditor extends HTMLElement {

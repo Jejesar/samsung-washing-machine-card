@@ -47,7 +47,9 @@ entities (completion time, job state) are found from the state entity's name.
 | `icon`                   | string  | `mdi:washing-machine`      | Icon in the left button                                                                         |
 | `completion_time_entity` | string  | auto-detected              | Timestamp sensor holding the end of the cycle                                                   |
 | `remaining_time_entity`  | string  | auto-detected              | Optional; otherwise the remaining time is the completion time minus now                         |
-| `job_state_entity`       | string  | auto-detected              | Used to tell a finished load from a machine that was never started                              |
+| `job_state_entity`       | string  | auto-detected              | Phase of the cycle, and how a finished load is told from a machine that was never started       |
+| `show_job_state`         | boolean | `true`                     | Put the phase in front of the remaining time                                                    |
+| `job_state_labels`       | map     | —                          | Override the name of any phase — see [Cycle phase](#cycle-phase)                                |
 | `progress_entity`        | string  | —                          | Optional 0-100 (or 0-1) sensor driving the bar — see [Progress](#progress)                      |
 | `start_time_entity`      | string  | —                          | Optional timestamp for the start of the cycle — see [Progress](#progress)                       |
 | `show_progress_bar`      | boolean | `true`                     | Show the bar while a cycle runs                                                                 |
@@ -73,11 +75,19 @@ device slug:
 | ------------------------------------- | ----------------------------------------- |
 | `sensor.<washer>_machine_state`       | `entity` — run / pause / stop             |
 | `sensor.<washer>_completion_time`     | remaining time, end time, progress        |
-| `sensor.<washer>_job_state`           | telling a finished load from a stopped one |
+| `sensor.<washer>_job_state`           | phase of the cycle, and telling a finished load from a stopped one |
 | `switch.<washer>`                     | the start button                          |
 
 The card derives the slug from `entity` (`sensor.lave_linge_machine_state` →
-`lave_linge`) and picks up the siblings on its own. Set the options explicitly
+`lave_linge`) and picks up the siblings on its own, including the French names
+the integration uses in a French Home Assistant (`_temps_restant`,
+`_etat_du_cycle`).
+
+**A "remaining time" entity holding a date is an end time.** Some locales
+publish the end of the cycle under that name; point `completion_time_entity` at
+it and everything works, since the card reads the value, not the name. The same
+entity often parks on `stop` when nothing runs — that is taken as a stopped
+machine, whatever the machine state says. Set the options explicitly
 when the entities were renamed, or when another integration is used:
 
 ```yaml
@@ -87,6 +97,38 @@ completion_time_entity: sensor.washer_finish_time
 job_state_entity: sensor.washer_job_state
 start_entity: switch.washer
 ```
+
+## Cycle phase
+
+With a job state entity, the subtitle leads with the phase the machine is in —
+`Rinsing · 22 min remaining · ends at 20:33`. The SmartThings values are
+translated in the card's three languages:
+
+| Value              | English         | Français           |
+| ------------------ | --------------- | ------------------ |
+| `weight_sensing`   | Weighing        | Pesée              |
+| `pre_wash`         | Pre-wash        | Prélavage          |
+| `wash` / `ai_wash` | Washing         | Lavage             |
+| `rinse`/`ai_rinse` | Rinsing         | Rinçage            |
+| `spin` / `ai_spin` | Spinning        | Essorage           |
+| `drying`           | Drying          | Séchage            |
+| `cooling`          | Cooling         | Refroidissement    |
+| `air_wash`         | Air wash        | Lavage à l'air     |
+| `delay_wash`       | Delayed start   | Départ différé     |
+| `wrinkle_prevent`  | Wrinkle prevent | Anti-froissage     |
+| `freeze_protection`| Freeze protection | Protection antigel |
+
+Anything else is shown as-is, underscores removed. `none` and the finished
+values are not phases and print nothing. Rename any of them with
+`job_state_labels`, keyed by the raw value:
+
+```yaml
+job_state_labels:
+    weight_sensing: Pesée du linge
+    wrinkle_prevent: Défroissage
+```
+
+Set `show_job_state: false` to keep the shorter `1h34 remaining · ends at 17:07`.
 
 ## Progress
 
@@ -176,6 +218,9 @@ the phones, then posts the notification when the machine starts, refreshes it
 every minute, clears it when the cycle ends and — optionally — sends a plain
 "cycle finished" notification. Like the card, it needs no helper entity: the
 start of the cycle is the state entity's `last_changed`.
+
+The message leads with the phase — `Rinçage · 22 min restant · fin à 20:33` —
+using the same names as the card; turn it off with *Show the current phase*.
 
 **Fill in the job state entity.** It is optional, but it is the only reliable
 way to know a load is over: a Samsung washer can sit on `run` after the
