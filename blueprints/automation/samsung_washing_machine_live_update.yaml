@@ -67,6 +67,14 @@ blueprint:
       default: "#2196F3"
       selector:
         text:
+    notify_service_override:
+      name: Notification service (optional)
+      description: >-
+        Leave empty to derive it from the phone above. Fill in the exact
+        notify.mobile_app_… service when the guess is wrong.
+      default: ""
+      selector:
+        text:
     notify_when_finished:
       name: Notify when the cycle is over
       description: Replaces the Live Update with a normal notification once the machine stops.
@@ -85,8 +93,11 @@ variables:
   running: !input running_state
   lang: !input language
   notify_finished: !input notify_when_finished
+  service_override: !input notify_service_override
   # mobile_app names its notify service after the device it registered.
-  notify_service: "notify.mobile_app_{{ device_attr(phone, 'name') | slugify }}"
+  notify_service: >-
+    {{ service_override if service_override
+       else 'notify.mobile_app_' ~ (device_attr(phone, 'name') | slugify) }}
   is_running: "{{ states(state_entity) == running }}"
   # The state entity has held "run" since the cycle started, so its
   # last_changed is the start of the cycle — no helper entity needed.
@@ -165,7 +176,10 @@ actions:
               data:
                 tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
           - condition: template
-            value_template: "{{ notify_finished and trigger.id == 'state_changed' and trigger.from_state.state == running }}"
+            value_template: >-
+              {{ notify_finished and trigger is defined
+                 and trigger.id == 'state_changed'
+                 and trigger.from_state.state == running }}
           - action: "{{ notify_service }}"
             data:
               title: !input notification_title
