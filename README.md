@@ -154,6 +154,65 @@ start_action:
         entity_id: script.start_washer
 ```
 
+## Android Live Update (status bar pill)
+
+Home Assistant's Android app can pin a **Live Update** notification while a
+cycle runs: a countdown pill in the status bar, a progress bar on the lock
+screen and the always-on display — Android 16's answer to the iPhone Dynamic
+Island. This is a notification sent by Home Assistant to the phone, so it is
+driven by an automation, not by the card; the repository ships a blueprint for
+it.
+
+[![Open your Home Assistant instance and show the blueprint import dialog.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2FJejesar%2Fsamsung-washing-machine-card%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fsamsung_washing_machine_live_update.yaml)
+
+Or: Settings → Automations & scenes → Blueprints → Import blueprint, with
+
+```
+https://github.com/Jejesar/samsung-washing-machine-card/blob/main/blueprints/automation/samsung_washing_machine_live_update.yaml
+```
+
+The blueprint asks for the washer state entity, the completion time entity and
+the phone, then posts the notification when the machine starts, refreshes it
+every minute, clears it when the cycle ends and — optionally — sends a plain
+"cycle finished" notification. Like the card, it needs no helper entity: the
+start of the cycle is the state entity's `last_changed`.
+
+Requirements and quirks, none of which the automation can work around:
+
+- **Android 16 or later**, with a recent companion app. On older Android the
+  same notification still posts, as an ordinary one without the pill.
+- **On Samsung phones**, the status bar chip only shows once *Live
+  notifications for all apps* is enabled in the developer options.
+- The title cannot change while the Live Update is on screen — only the
+  message, the progress and the countdown do.
+- iOS is not covered: Live Activities need an app extension, and the companion
+  app only ships the ones it defines itself.
+
+Written out by hand, the notification is a plain service call:
+
+```yaml
+action: notify.mobile_app_<your_phone>
+data:
+    title: Washing machine
+    message: 1h34 remaining · ends at 17:07
+    data:
+        tag: washing_machine
+        live_update: true
+        progress: 8400
+        progress_max: 14040
+        chronometer: true
+        when: 5640
+        when_relative: true
+        notification_icon: mdi:washing-machine
+        color: "#2196F3"
+```
+
+`tag` is what ties the updates together: sending the same tag again refreshes
+the notification silently, and `message: clear_notification` with that tag
+removes it. See the [companion app
+documentation](https://companion.home-assistant.io/docs/notifications/live-activities/).
+
+
 ## Wording
 
 The card ships with English, French and Dutch, following the Home Assistant

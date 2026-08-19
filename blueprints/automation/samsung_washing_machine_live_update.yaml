@@ -1,0 +1,179 @@
+blueprint:
+  name: Washing machine Live Update notification
+  description: >-
+    Pins a Live Update notification on an Android phone while the washing
+    machine runs: a countdown pill in the status bar, a progress bar on the
+    lock screen, and the end time in the notification shade. The notification
+    is refreshed every minute and cleared when the cycle ends.
+
+    Companion of the Samsung Washing Machine Card
+    (https://github.com/Jejesar/samsung-washing-machine-card), but it works on
+    its own — it only needs a state entity and a completion time entity.
+
+    Requires Android 16 or later and a recent Home Assistant companion app.
+  domain: automation
+  source_url: https://github.com/Jejesar/samsung-washing-machine-card/blob/main/blueprints/automation/samsung_washing_machine_live_update.yaml
+  input:
+    machine_state_entity:
+      name: Washer state entity
+      description: SmartThings exposes it as sensor.<washer>_machine_state.
+      selector:
+        entity:
+          domain: [sensor, binary_sensor, switch]
+    completion_time_entity:
+      name: Completion time entity
+      description: Timestamp sensor holding the end of the cycle.
+      selector:
+        entity:
+          domain: [sensor, input_datetime]
+    notify_device:
+      name: Phone
+      description: The Android device the notification is sent to.
+      selector:
+        device:
+          integration: mobile_app
+    running_state:
+      name: Running state
+      description: Value of the state entity while a cycle is running.
+      default: run
+      selector:
+        text:
+    notification_title:
+      name: Title
+      description: Header of the notification; Android does not let it change mid-cycle.
+      default: Washing machine
+      selector:
+        text:
+    language:
+      name: Language
+      default: en
+      selector:
+        select:
+          options:
+            - label: English
+              value: en
+            - label: Français
+              value: fr
+            - label: Nederlands
+              value: nl
+    notification_icon:
+      name: Icon
+      default: mdi:washing-machine
+      selector:
+        icon:
+    notification_color:
+      name: Colour
+      description: Accent of the notification and of the status bar pill.
+      default: "#2196F3"
+      selector:
+        text:
+    notify_when_finished:
+      name: Notify when the cycle is over
+      description: Replaces the Live Update with a normal notification once the machine stops.
+      default: true
+      selector:
+        boolean:
+
+mode: queued
+max: 5
+max_exceeded: silent
+
+variables:
+  state_entity: !input machine_state_entity
+  end_entity: !input completion_time_entity
+  phone: !input notify_device
+  running: !input running_state
+  lang: !input language
+  notify_finished: !input notify_when_finished
+  # mobile_app names its notify service after the device it registered.
+  notify_service: "notify.mobile_app_{{ device_attr(phone, 'name') | slugify }}"
+  is_running: "{{ states(state_entity) == running }}"
+  # The state entity has held "run" since the cycle started, so its
+  # last_changed is the start of the cycle — no helper entity needed.
+  started_iso: "{{ (states[state_entity].last_changed | default(now())).isoformat() }}"
+  ends_iso: "{{ states(end_entity) }}"
+
+triggers:
+  - trigger: state
+    entity_id: !input machine_state_entity
+    id: state_changed
+  # The washer keeps re-estimating the end of the cycle.
+  - trigger: state
+    entity_id: !input completion_time_entity
+    id: end_moved
+  - trigger: time_pattern
+    minutes: /1
+    id: tick
+
+conditions:
+  # Ignore attribute-only updates and the unavailable blips around a restart.
+  - condition: template
+    value_template: >-
+      {{ trigger.id != 'state_changed'
+         or trigger.to_state.state != trigger.from_state.state | default('') }}
+  # A stopped machine only needs one clear, on the transition — not every minute.
+  - condition: template
+    value_template: "{{ is_running or trigger.id == 'state_changed' }}"
+
+actions:
+  - choose:
+      # ---- running: post or refresh the Live Update -------------------
+      - conditions:
+          - condition: template
+            value_template: "{{ is_running and (ends_iso | as_datetime) is not none }}"
+        sequence:
+          - variables:
+              total: >-
+                {{ [(((ends_iso | as_datetime) - (started_iso | as_datetime)).total_seconds() | int), 1] | max }}
+              elapsed: >-
+                {{ [((now() - (started_iso | as_datetime)).total_seconds() | int), 0] | max }}
+              left: >-
+                {{ [(((ends_iso | as_datetime) - now()).total_seconds() | int), 0] | max }}
+              at: "{{ ((ends_iso | as_datetime) | as_local).strftime('%H:%M') }}"
+          - action: "{{ notify_service }}"
+            data:
+              title: !input notification_title
+              message: >-
+                {% set h = left // 3600 %}
+                {% set m = (left % 3600) // 60 %}
+                {% set rem = (h ~ 'h' ~ '%02d' % m) if h > 0 else (m ~ ' min') %}
+                {% if lang == 'fr' %}{{ rem }} restant · fin à {{ at }}
+                {% elif lang == 'nl' %}nog {{ rem }} · klaar om {{ at }}
+                {% else %}{{ rem }} remaining · ends at {{ at }}{% endif %}
+              data:
+                tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
+                live_update: true
+                progress: "{{ [elapsed, total] | min }}"
+                progress_max: "{{ total }}"
+                # The chip in the status bar shows this countdown.
+                chronometer: true
+                when: "{{ left }}"
+                when_relative: true
+                sticky: true
+                alert_once: true
+                notification_icon: !input notification_icon
+                color: !input notification_color
+
+      # ---- stopped: drop the Live Update, then say it is done ---------
+      - conditions:
+          - condition: template
+            value_template: "{{ not is_running }}"
+        sequence:
+          - action: "{{ notify_service }}"
+            data:
+              message: clear_notification
+              data:
+                tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
+          - condition: template
+            value_template: "{{ notify_finished and trigger.id == 'state_changed' and trigger.from_state.state == running }}"
+          - action: "{{ notify_service }}"
+            data:
+              title: !input notification_title
+              message: >-
+                {% if lang == 'fr' %}Cycle terminé
+                {% elif lang == 'nl' %}Cyclus klaar
+                {% else %}Cycle finished{% endif %}
+              data:
+                tag: "washing_machine_{{ state_entity | replace('.', '_') }}_done"
+                notification_icon: !input notification_icon
+                color: !input notification_color
