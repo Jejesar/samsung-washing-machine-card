@@ -6,7 +6,7 @@
  * Designed for the SmartThings integration.
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 const DEFAULTS = {
   icon: "mdi:washing-machine",
