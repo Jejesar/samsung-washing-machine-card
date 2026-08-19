@@ -27,11 +27,15 @@ blueprint:
         entity:
           domain: [sensor, input_datetime]
     notify_device:
-      name: Phone
-      description: The Android device the notification is sent to.
+      name: Phones
+      description: >-
+        The Android devices the notification is sent to. Several can be picked;
+        each one gets its own Live Update.
+      default: []
       selector:
         device:
           integration: mobile_app
+          multiple: true
     running_state:
       name: Running state
       description: Value of the state entity while a cycle is running.
@@ -70,8 +74,9 @@ blueprint:
     notify_service_override:
       name: Notification service (optional)
       description: >-
-        Leave empty to derive it from the phone above. Fill in the exact
-        notify.mobile_app_… service when the guess is wrong.
+        Leave empty to derive the services from the phones above. Fill in a
+        notify group, or a comma separated list of services, to send somewhere
+        the guess cannot reach.
       default: ""
       selector:
         text:
@@ -89,15 +94,26 @@ max_exceeded: silent
 variables:
   state_entity: !input machine_state_entity
   end_entity: !input completion_time_entity
-  phone: !input notify_device
+  phones: !input notify_device
   running: !input running_state
   lang: !input language
   notify_finished: !input notify_when_finished
   service_override: !input notify_service_override
-  # mobile_app names its notify service after the device it registered.
-  notify_service: >-
-    {{ service_override if service_override
-       else 'notify.mobile_app_' ~ (device_attr(phone, 'name') | slugify) }}
+  # mobile_app names its notify service after the device it registered. A
+  # notify group counts as one service and fans out on its own, so the override
+  # is the way to reach a group.
+  notify_services: >-
+    {% set ns = namespace(items=[]) %}
+    {% if service_override %}
+      {% for s in service_override.split(',') if s | trim %}
+        {% set ns.items = ns.items + [s | trim] %}
+      {% endfor %}
+    {% else %}
+      {% for d in phones %}
+        {% set ns.items = ns.items + ['notify.mobile_app_' ~ (device_attr(d, 'name') | slugify)] %}
+      {% endfor %}
+    {% endif %}
+    {{ ns.items }}
   is_running: "{{ states(state_entity) == running }}"
   # The state entity has held "run" since the cycle started, so its
   # last_changed is the start of the cycle — no helper entity needed.
@@ -141,53 +157,62 @@ actions:
               left: >-
                 {{ [(((ends_iso | as_datetime) - now()).total_seconds() | int), 0] | max }}
               at: "{{ ((ends_iso | as_datetime) | as_local).strftime('%H:%M') }}"
-          - action: "{{ notify_service }}"
-            data:
-              title: !input notification_title
-              message: >-
-                {% set h = left // 3600 %}
-                {% set m = (left % 3600) // 60 %}
-                {% set rem = (h ~ 'h' ~ '%02d' % m) if h > 0 else (m ~ ' min') %}
-                {% if lang == 'fr' %}{{ rem }} restant · fin à {{ at }}
-                {% elif lang == 'nl' %}nog {{ rem }} · klaar om {{ at }}
-                {% else %}{{ rem }} remaining · ends at {{ at }}{% endif %}
-              data:
-                tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
-                live_update: true
-                progress: "{{ [elapsed, total] | min }}"
-                progress_max: "{{ total }}"
-                # The chip in the status bar shows this countdown.
-                chronometer: true
-                when: "{{ left }}"
-                when_relative: true
-                sticky: true
-                alert_once: true
-                notification_icon: !input notification_icon
-                color: !input notification_color
+          - repeat:
+              for_each: "{{ notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: !input notification_title
+                    message: >-
+                      {% set h = left // 3600 %}
+                      {% set m = (left % 3600) // 60 %}
+                      {% set rem = (h ~ 'h' ~ '%02d' % m) if h > 0 else (m ~ ' min') %}
+                      {% if lang == 'fr' %}{{ rem }} restant · fin à {{ at }}
+                      {% elif lang == 'nl' %}nog {{ rem }} · klaar om {{ at }}
+                      {% else %}{{ rem }} remaining · ends at {{ at }}{% endif %}
+                    data:
+                      tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
+                      live_update: true
+                      progress: "{{ [elapsed, total] | min }}"
+                      progress_max: "{{ total }}"
+                      # The chip in the status bar shows this countdown.
+                      chronometer: true
+                      when: "{{ left }}"
+                      when_relative: true
+                      sticky: true
+                      alert_once: true
+                      notification_icon: !input notification_icon
+                      color: !input notification_color
 
       # ---- stopped: drop the Live Update, then say it is done ---------
       - conditions:
           - condition: template
             value_template: "{{ not is_running }}"
         sequence:
-          - action: "{{ notify_service }}"
-            data:
-              message: clear_notification
-              data:
-                tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
+          - repeat:
+              for_each: "{{ notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    message: clear_notification
+                    data:
+                      tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
           - condition: template
             value_template: >-
               {{ notify_finished and trigger is defined
                  and trigger.id == 'state_changed'
                  and trigger.from_state.state == running }}
-          - action: "{{ notify_service }}"
-            data:
-              title: !input notification_title
-              message: >-
-                {% if lang == 'fr' %}Cycle terminé
-                {% elif lang == 'nl' %}Cyclus klaar
-                {% else %}Cycle finished{% endif %}
-              data:
-                tag: "washing_machine_{{ state_entity | replace('.', '_') }}_done"
-                notification_icon: !input notification_icon
-                color: !input notification_color
+          - repeat:
+              for_each: "{{ notify_services }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: !input notification_title
+                    message: >-
+                      {% if lang == 'fr' %}Cycle terminé
+                      {% elif lang == 'nl' %}Cyclus klaar
+                      {% else %}Cycle finished{% endif %}
+                    data:
+                      tag: "washing_machine_{{ state_entity | replace('.', '_') }}_done"
+                      notification_icon: !input notification_icon
+                      color: !input notification_color

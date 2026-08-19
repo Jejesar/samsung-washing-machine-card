@@ -172,10 +172,30 @@ https://github.com/Jejesar/samsung-washing-machine-card/blob/main/blueprints/aut
 ```
 
 The blueprint asks for the washer state entity, the completion time entity and
-the phone, then posts the notification when the machine starts, refreshes it
+the phones, then posts the notification when the machine starts, refreshes it
 every minute, clears it when the cycle ends and — optionally — sends a plain
 "cycle finished" notification. Like the card, it needs no helper entity: the
 start of the cycle is the state entity's `last_changed`.
+
+**Several phones need one automation, not one each.** The phone input takes as
+many devices as you like and the notification is sent to each of them. A
+[notify group](https://www.home-assistant.io/integrations/group/#notify-groups)
+works too — it forwards the whole payload, Live Update keys included — through
+the *Notification service* field, which also accepts a comma separated list:
+
+```yaml
+# configuration.yaml — optional, only if you prefer a group
+notify:
+    - platform: group
+      name: phones
+      services:
+          - action: mobile_app_pixel_9
+          - action: mobile_app_galaxy_s24
+```
+
+```
+Notification service: notify.phones
+```
 
 Requirements and quirks, none of which the automation can work around:
 
