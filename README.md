@@ -177,6 +177,33 @@ every minute, clears it when the cycle ends and — optionally — sends a plain
 "cycle finished" notification. Like the card, it needs no helper entity: the
 start of the cycle is the state entity's `last_changed`.
 
+**Fill in the job state entity.** It is optional, but it is the only reliable
+way to know a load is over: a Samsung washer can sit on `run` after the
+programme — wrinkle care, an extra spin, or simply an idle machine that never
+went back to `stop` — and it republishes a completion time for the programme
+still selected on the dial. Without the job state the blueprint takes that for
+a new cycle and posts a fresh countdown. With it, `finish` (or `none`) ends the
+notification whatever the machine state says. `Finished job states` holds the
+values that count as over; drop `none` from the list if your washer idles the
+job state at `none` between the start of a cycle and its first real phase, as
+the notification would otherwise wait a minute before appearing.
+
+Two more safety nets need no configuration: an end time more than five minutes
+behind clears the notification even without a job state entity, and an
+`unavailable` state — an integration dropout — is ignored instead of being read
+as the end of the cycle.
+
+If a notification is stuck on a phone, clear it by hand from Developer tools →
+Actions; the tag is the state entity id with dots replaced by underscores:
+
+```yaml
+action: notify.mobile_app_<your_phone>
+data:
+    message: clear_notification
+    data:
+        tag: washing_machine_sensor_lave_linge_machine_state
+```
+
 **Several phones need one automation, not one each.** The phone input takes as
 many devices as you like and the notification is sent to each of them. A
 [notify group](https://www.home-assistant.io/integrations/group/#notify-groups)

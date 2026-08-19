@@ -36,6 +36,24 @@ blueprint:
         device:
           integration: mobile_app
           multiple: true
+    job_state_entity:
+      name: Job state entity (optional)
+      description: >-
+        SmartThings exposes it as sensor.<washer>_job_state. Strongly
+        recommended: it is what tells a finished load from a machine that is
+        still turning, whatever the machine state says.
+      default: ""
+      selector:
+        entity:
+          domain: [sensor]
+    finished_job_states:
+      name: Finished job states
+      description: >-
+        Values of the job state entity that mean the load is over. Comma
+        separated.
+      default: finish, finished, none
+      selector:
+        text:
     running_state:
       name: Running state
       description: Value of the state entity while a cycle is running.
@@ -91,9 +109,17 @@ mode: queued
 max: 5
 max_exceeded: silent
 
+# Inputs the template trigger needs; blueprint variables are not available
+# there, trigger_variables are.
+trigger_variables:
+  job_entity_t: !input job_state_entity
+  finished_jobs_t: !input finished_job_states
+
 variables:
   state_entity: !input machine_state_entity
   end_entity: !input completion_time_entity
+  job_entity: !input job_state_entity
+  finished_jobs_raw: !input finished_job_states
   phones: !input notify_device
   running: !input running_state
   lang: !input language
@@ -114,11 +140,27 @@ variables:
       {% endfor %}
     {% endif %}
     {{ ns.items }}
-  is_running: "{{ states(state_entity) == running }}"
+  finished_jobs: >-
+    {{ finished_jobs_raw.split(',') | map('trim') | map('lower') | reject('eq', '') | list }}
+  job_finished: >-
+    {{ job_entity != '' and (states(job_entity) | lower) in finished_jobs }}
+  # A washer that keeps tumbling after the programme — wrinkle care, an extra
+  # spin, or simply a machine left on "run" while idle — reports a state that
+  # says nothing about the load, so the job state has the last word.
+  is_running: "{{ states(state_entity) == running and not job_finished }}"
   # The state entity has held "run" since the cycle started, so its
   # last_changed is the start of the cycle — no helper entity needed.
-  started_iso: "{{ (states[state_entity].last_changed | default(now())).isoformat() }}"
-  ends_iso: "{{ states(end_entity) }}"
+  # Epoch seconds all the way down: a datetime in a variable is rendered back
+  # to text before the next step reads it, an integer survives.
+  started_ts: "{{ (states[state_entity].last_changed | default(now())).timestamp() | int }}"
+  ends_ts: >-
+    {{ (states(end_entity) | as_datetime).timestamp() | int
+       if (states(end_entity) | as_datetime) is not none else 0 }}
+  now_ts: "{{ now().timestamp() | int }}"
+  # Last resort for a machine that never leaves "run" and has no job state: its
+  # own end time is well behind us, so whatever it is doing, the cycle is over.
+  # The window keeps this from firing again on every following tick.
+  stale_end: "{{ ends_ts > 0 and 300 <= (now_ts - ends_ts) < 420 }}"
 
 triggers:
   - trigger: state
@@ -128,35 +170,45 @@ triggers:
   - trigger: state
     entity_id: !input completion_time_entity
     id: end_moved
+  # Fires the moment the job state enters one of the finished values. Written
+  # as a template so the blueprint stays usable without a job state entity.
+  - trigger: template
+    id: job_done
+    value_template: >-
+      {{ job_entity_t != ''
+         and (states(job_entity_t) | lower)
+             in (finished_jobs_t.split(',') | map('trim') | map('lower') | list) }}
   - trigger: time_pattern
     minutes: /1
     id: tick
 
 conditions:
-  # Ignore attribute-only updates and the unavailable blips around a restart.
+  # Ignore attribute-only updates.
   - condition: template
     value_template: >-
       {{ trigger.id != 'state_changed'
          or trigger.to_state.state != trigger.from_state.state | default('') }}
-  # A stopped machine only needs one clear, on the transition — not every minute.
+  # An integration dropout is not the end of a cycle: leave the notification
+  # alone rather than clearing it and posting a fresh one on reconnection.
   - condition: template
-    value_template: "{{ is_running or trigger.id == 'state_changed' }}"
+    value_template: "{{ states(state_entity) not in ['unavailable', 'unknown'] }}"
+  # Once everything is idle there is nothing to refresh and nothing to clear.
+  - condition: template
+    value_template: >-
+      {{ is_running or stale_end or trigger.id in ['state_changed', 'job_done'] }}
 
 actions:
   - choose:
       # ---- running: post or refresh the Live Update -------------------
       - conditions:
           - condition: template
-            value_template: "{{ is_running and (ends_iso | as_datetime) is not none }}"
+            value_template: "{{ is_running and ends_ts > now_ts }}"
         sequence:
           - variables:
-              total: >-
-                {{ [(((ends_iso | as_datetime) - (started_iso | as_datetime)).total_seconds() | int), 1] | max }}
-              elapsed: >-
-                {{ [((now() - (started_iso | as_datetime)).total_seconds() | int), 0] | max }}
-              left: >-
-                {{ [(((ends_iso | as_datetime) - now()).total_seconds() | int), 0] | max }}
-              at: "{{ ((ends_iso | as_datetime) | as_local).strftime('%H:%M') }}"
+              total: "{{ [ends_ts - started_ts, 1] | max }}"
+              elapsed: "{{ [now_ts - started_ts, 0] | max }}"
+              left: "{{ [ends_ts - now_ts, 0] | max }}"
+              at: "{{ ends_ts | timestamp_custom('%H:%M') }}"
           - repeat:
               for_each: "{{ notify_services }}"
               sequence:
@@ -184,10 +236,10 @@ actions:
                       notification_icon: !input notification_icon
                       color: !input notification_color
 
-      # ---- stopped: drop the Live Update, then say it is done ---------
+      # ---- over: drop the Live Update, then say it is done ------------
       - conditions:
           - condition: template
-            value_template: "{{ not is_running }}"
+            value_template: "{{ not is_running or stale_end }}"
         sequence:
           - repeat:
               for_each: "{{ notify_services }}"
@@ -197,11 +249,19 @@ actions:
                     message: clear_notification
                     data:
                       tag: "washing_machine_{{ state_entity | replace('.', '_') }}"
+          # Only a real end deserves a second notification: the job state
+          # entering a finished value, or the machine leaving the running
+          # state while the job state has not already said so. The end time
+          # has to be around now as well — an idle machine re-evaluated after
+          # a Home Assistant restart is not a load that just finished.
           - condition: template
             value_template: >-
               {{ notify_finished and trigger is defined
-                 and trigger.id == 'state_changed'
-                 and trigger.from_state.state == running }}
+                 and ends_ts > 0 and ((now_ts - ends_ts) | abs) <= 1800
+                 and (trigger.id == 'job_done'
+                      or (trigger.id == 'state_changed'
+                          and trigger.from_state.state == running
+                          and not job_finished)) }}
           - repeat:
               for_each: "{{ notify_services }}"
               sequence:
@@ -214,5 +274,6 @@ actions:
                       {% else %}Cycle finished{% endif %}
                     data:
                       tag: "washing_machine_{{ state_entity | replace('.', '_') }}_done"
+                      alert_once: true
                       notification_icon: !input notification_icon
                       color: !input notification_color
